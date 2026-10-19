@@ -124,7 +124,11 @@ def format_label(class_name: str) -> dict:
 
     disease_original = disease_key.replace("_", " ").strip()
     disease_lookup = disease_original.lower()
-    disease_name = DISEASE_NAMES_TH.get(disease_lookup, disease_original)
+    disease_name = DISEASE_NAMES_TH.get(disease_lookup)
+    if disease_name is None:
+        # Make any unmapped label readable rather than exposing dataset formatting.
+        disease_name = disease_original.replace("(", "(").strip()
+        disease_name = disease_name[:1].upper() + disease_name[1:]
 
     return {
         "plant": plant_name,
@@ -221,8 +225,7 @@ if uploaded is not None:
                                     st.markdown("### 🌿 สถานะ: ใบปกติ")
                                 else:
                                     st.markdown(f"### 🦠 โรคที่คาดการณ์: {best_display['disease']}")
-                                st.caption(f"ชื่อคลาสต้นฉบับ: {best_display['original']}")
-                                st.markdown(f"**คะแนนจากโมเดล: {best['confidence']:.1%}**")
+                                st.markdown(f"**ความมั่นใจในการทำนาย: {best['confidence']:.1%}**")
                                 st.progress(min(max(best["confidence"], 0.0), 1.0))
 
                             st.markdown("#### ผลลัพธ์ทางเลือก")
@@ -237,10 +240,9 @@ if uploaded is not None:
                                             st.markdown("🌿 ใบปกติ")
                                         else:
                                             st.markdown(f"🦠 {display['disease']}")
-                                        st.caption(display["original"])
-                                        st.markdown(f'<div class="score">คะแนนโมเดล: {item["confidence"]:.1%}</div>', unsafe_allow_html=True)
+                                        st.markdown(f'<div class="score">ความมั่นใจในการทำนาย: {item["confidence"]:.1%}</div>', unsafe_allow_html=True)
 
-                            st.warning("สำคัญ: คะแนนนี้เป็นค่าที่โมเดลคำนวณ ไม่ได้หมายความว่ามีโอกาสถูกต้องตามเปอร์เซ็นต์นั้น และไม่ใช่การยืนยันโรค หากอาการไม่ตรงกับภาพหรือไม่แน่ใจ ควรตรวจสอบกับแหล่งข้อมูลหรือผู้เชี่ยวชาญเพิ่มเติม")
+                            st.warning("โปรดทราบ: คะแนนนี้เป็นค่าการทำนายจากระบบ ไม่ใช่การยืนยันว่าพืชเป็นโรคดังกล่าวจริง หากอาการไม่ตรงกับภาพหรือยังไม่แน่ใจ ควรตรวจสอบข้อมูลเพิ่มเติมหรือปรึกษาผู้เชี่ยวชาญ")
                             st.caption(f"ใช้เวลาประมวลผลประมาณ {result['inference_ms']:.0f} มิลลิวินาที")
                     except Exception as exc:
                         st.error("เกิดปัญหาระหว่างโหลดโมเดลหรือวิเคราะห์ภาพ")
