@@ -24,16 +24,20 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .block-container { max-width: 800px; padding-top: 1.5rem; padding-bottom: 3rem; }
-    .hero { padding: 1.35rem 1.4rem; border: 1px solid rgba(100,140,100,.28); border-radius: 20px; margin-bottom: 1.1rem; background: rgba(100,140,100,.045); }
-    .eyebrow { font-size: .82rem; letter-spacing: .04em; text-transform: uppercase; opacity: .72; }
-    .muted { opacity: .78; font-size: .92rem; }
-    .result-primary { padding: 1rem 1.1rem; border: 1px solid rgba(70,145,85,.45); border-radius: 16px; background: rgba(70,145,85,.07); }
-    .result-rank { font-size: .78rem; opacity: .75; margin-bottom: .25rem; }
-    .result-secondary { padding: .8rem .9rem; border: 1px solid rgba(128,128,128,.22); border-radius: 14px; min-height: 100%; }
-    .result-secondary .label { font-size: .92rem; line-height: 1.4; font-weight: 600; }
-    .result-secondary .score { font-size: 1.05rem; font-weight: 650; margin-top: .45rem; }
-    .stButton button { width: 100%; border-radius: 12px; min-height: 2.8rem; }
+    .stApp { background: #f7faf6; color: #203326; }
+    [data-testid="stHeader"] { background: rgba(247,250,246,.92); }
+    .block-container { max-width: 820px; padding-top: 1.5rem; padding-bottom: 3rem; }
+    .hero { padding: 1.35rem 1.4rem; border: 1px solid #dce9d9; border-radius: 20px; margin-bottom: 1.1rem; background: #ffffff; }
+    .eyebrow { font-size: .82rem; letter-spacing: .04em; color: #527557; }
+    .muted { color: #607064; font-size: .92rem; }
+    .result-primary { padding: 1rem 1.1rem; border: 1px solid #c8dfc5; border-radius: 16px; background: #ffffff; }
+    .result-rank { font-size: .82rem; color: #607064; margin-bottom: .35rem; }
+    .result-secondary { background: #ffffff; border: 1px solid #e0e8dd; border-radius: 14px; padding: .8rem .9rem; min-height: 100%; }
+    .result-secondary .label { font-size: .92rem; line-height: 1.45; font-weight: 600; color: #304735; }
+    .result-secondary .score { font-size: 1rem; font-weight: 650; margin-top: .45rem; color: #527557; }
+    div[data-testid="stAlert"] { border-radius: 12px; }
+    .stButton button { width: 100%; border-radius: 12px; min-height: 2.8rem; background: #47794d; border-color: #47794d; }
+    .stButton button:hover { background: #365f3c; border-color: #365f3c; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,16 +64,74 @@ def load_model():
     return loaded
 
 
-def format_label(class_name: str) -> str:
-    plant, disease = class_name.split("___", 1)
-    plant = (plant.replace("_(including_sour)", "")
-                  .replace("_(maize)", "")
-                  .replace(",_bell", " bell")
-                  .replace("_", " ").strip())
-    disease = disease.replace("_", " ").strip()
-    if disease.lower() == "healthy":
-        return f"{plant} — ใบปกติ (Healthy)"
-    return f"{plant} — {disease}"
+PLANT_NAMES_TH = {
+    "Apple": "แอปเปิล",
+    "Blueberry": "บลูเบอร์รี",
+    "Cherry_(including_sour)": "เชอร์รี",
+    "Cherry": "เชอร์รี",
+    "Corn_(maize)": "ข้าวโพด",
+    "Corn": "ข้าวโพด",
+    "Grape": "องุ่น",
+    "Orange": "ส้ม",
+    "Peach": "พีช",
+    "Pepper,_bell": "พริกหวาน",
+    "Pepper": "พริก",
+    "Potato": "มันฝรั่ง",
+    "Raspberry": "ราสป์เบอร์รี",
+    "Soybean": "ถั่วเหลือง",
+    "Squash": "ฟักทอง",
+    "Strawberry": "สตรอว์เบอร์รี",
+    "Tomato": "มะเขือเทศ",
+}
+
+DISEASE_NAMES_TH = {
+    "healthy": "ใบปกติ",
+    "apple scab": "โรคแคงเกอร์/ตกสะเก็ดแอปเปิล",
+    "black rot": "โรคผลเน่าดำ",
+    "cedar apple rust": "โรคราสนิมซีดาร์-แอปเปิล",
+    "powdery mildew": "โรคราแป้ง",
+    "cercospora leaf spot gray leaf spot": "โรคใบจุดเซอร์โคสปอรา",
+    "common rust": "โรคราสนิมทั่วไป",
+    "northern leaf blight": "โรคใบไหม้ทางเหนือ",
+    "esca (black measles)": "โรคเอสกา",
+    "leaf blight (isariopsis leaf spot)": "โรคใบไหม้",
+    "haunglongbing (citrus greening)": "โรคกรีนนิงของส้ม",
+    "bacterial spot": "โรคใบจุดแบคทีเรีย",
+    "early blight": "โรคใบไหม้ระยะแรก",
+    "late blight": "โรคใบไหม้ระยะท้าย",
+    "leaf scorch": "โรคใบไหม้แห้ง",
+    "leaf mold": "โรคราใบ",
+    "septoria leaf spot": "โรคใบจุดเซพโทเรีย",
+    "spider mites two-spotted spider mite": "ความเสียหายจากไรแมงมุม",
+    "target spot": "โรคใบจุดเป้า",
+    "tomato yellow leaf curl virus": "โรคใบหงิกเหลืองจากไวรัส",
+    "tomato mosaic virus": "โรคโมเสกมะเขือเทศ",
+    "two-spotted spider mite": "ความเสียหายจากไรแมงมุม",
+    "bacterial spot": "โรคใบจุดแบคทีเรีย",
+    "leaf spot": "โรคใบจุด",
+    "mosaic virus": "โรคโมเสกจากไวรัส",
+}
+
+def format_label(class_name: str) -> dict:
+    """Return human-readable Thai names while preserving the original class label."""
+    if "___" not in class_name:
+        return {"plant": class_name, "disease": "ไม่ทราบคลาส", "original": class_name}
+
+    plant_key, disease_key = class_name.split("___", 1)
+    plant_lookup = plant_key.replace("_(including_sour)", "").replace("_(maize)", "")
+    plant_lookup = plant_lookup.replace(",_bell", "").replace("_", " ").strip()
+    plant_name = PLANT_NAMES_TH.get(plant_key, PLANT_NAMES_TH.get(plant_lookup, plant_lookup))
+
+    disease_original = disease_key.replace("_", " ").strip()
+    disease_lookup = disease_original.lower()
+    disease_name = DISEASE_NAMES_TH.get(disease_lookup, disease_original)
+
+    return {
+        "plant": plant_name,
+        "disease": disease_name,
+        "original": f"{plant_lookup} — {disease_original}",
+        "healthy": disease_lookup == "healthy",
+    }
 
 
 def image_suitability_check(rgb_image: Image.Image):
@@ -103,7 +165,7 @@ def predict(image: Image.Image):
     top = [
         {
             "class_name": CLASS_NAMES[int(i)],
-            "label": format_label(CLASS_NAMES[int(i)]),
+            "display": format_label(CLASS_NAMES[int(i)]),
             "confidence": float(probabilities[i]),
         }
         for i in top_indices
@@ -151,23 +213,34 @@ if uploaded is not None:
                         else:
                             best = result["top"][0]
                             st.success("ประเมินภาพเสร็จแล้ว")
+                            best_display = best["display"]
                             with st.container(border=True):
-                                st.markdown('<div class="result-rank">อันดับ 1 · ผลที่ระบบประเมินว่าน่าจะใกล้เคียงที่สุด</div>', unsafe_allow_html=True)
-                                st.markdown(f"### {best['label']}")
-                                st.markdown(f"**คะแนนความมั่นใจของโมเดล: {best['confidence']:.1%}**")
+                                st.markdown('<div class="result-rank">อันดับ 1 · ผลที่ระบบประเมินว่าใกล้เคียงที่สุด</div>', unsafe_allow_html=True)
+                                st.markdown(f"## 🌱 พืช: {best_display['plant']}")
+                                if best_display.get("healthy", False):
+                                    st.markdown("### 🌿 สถานะ: ใบปกติ")
+                                else:
+                                    st.markdown(f"### 🦠 โรคที่คาดการณ์: {best_display['disease']}")
+                                st.caption(f"ชื่อคลาสต้นฉบับ: {best_display['original']}")
+                                st.markdown(f"**คะแนนจากโมเดล: {best['confidence']:.1%}**")
                                 st.progress(min(max(best["confidence"], 0.0), 1.0))
 
-                            st.markdown("#### ผลลัพธ์อื่นที่เป็นไปได้")
+                            st.markdown("#### ผลลัพธ์ทางเลือก")
                             secondary_cols = st.columns(2)
                             for col, rank, item in zip(secondary_cols, (2, 3), result["top"][1:3]):
+                                display = item["display"]
                                 with col:
                                     with st.container(border=True):
                                         st.markdown(f'<div class="result-rank">อันดับ {rank}</div>', unsafe_allow_html=True)
-                                        st.markdown(f'<div class="label">{item["label"]}</div>', unsafe_allow_html=True)
-                                        st.markdown(f'<div class="score">{item["confidence"]:.1%}</div>', unsafe_allow_html=True)
-                                        st.progress(min(max(item["confidence"], 0.0), 1.0))
+                                        st.markdown(f"**🌱 {display['plant']}**")
+                                        if display.get("healthy", False):
+                                            st.markdown("🌿 ใบปกติ")
+                                        else:
+                                            st.markdown(f"🦠 {display['disease']}")
+                                        st.caption(display["original"])
+                                        st.markdown(f'<div class="score">คะแนนโมเดล: {item["confidence"]:.1%}</div>', unsafe_allow_html=True)
 
-                            st.info("ข้อควรทราบ: เปอร์เซ็นต์นี้เป็นคะแนนความมั่นใจที่คำนวณโดยระบบ ไม่ใช่ความน่าจะเป็นที่ยืนยันว่าโรคดังกล่าวถูกต้อง และไม่ใช่การวินิจฉัยจากผู้เชี่ยวชาญ ผลอาจคลาดเคลื่อนได้ โดยเฉพาะภาพที่ต่างจากตัวอย่างที่ระบบรองรับ")
+                            st.warning("สำคัญ: คะแนนนี้เป็นค่าที่โมเดลคำนวณ ไม่ได้หมายความว่ามีโอกาสถูกต้องตามเปอร์เซ็นต์นั้น และไม่ใช่การยืนยันโรค หากอาการไม่ตรงกับภาพหรือไม่แน่ใจ ควรตรวจสอบกับแหล่งข้อมูลหรือผู้เชี่ยวชาญเพิ่มเติม")
                             st.caption(f"ใช้เวลาประมวลผลประมาณ {result['inference_ms']:.0f} มิลลิวินาที")
                     except Exception as exc:
                         st.error("เกิดปัญหาระหว่างโหลดโมเดลหรือวิเคราะห์ภาพ")
@@ -176,4 +249,4 @@ if uploaded is not None:
             st.error("อ่านภาพนี้ไม่ได้ กรุณาเลือกไฟล์ภาพใหม่")
 
 st.divider()
-st.caption("เครื่องมือนี้ใช้ช่วยคัดกรองเบื้องต้นเท่านั้น ไม่ควรใช้แทนการตรวจสอบจากผู้เชี่ยวชาญหรือใช้ตัดสินใจเรื่องการรักษาพืชเพียงอย่างเดียว")
+st.caption("PlantCare เป็นเครื่องมือช่วยประเมินเบื้องต้น ผลอาจผิดพลาดได้ ควรใช้ร่วมกับการสังเกตอาการจริงและคำแนะนำจากผู้เชี่ยวชาญ")
