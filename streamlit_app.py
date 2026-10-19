@@ -11,7 +11,8 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "best_mobilenetv2_plantdisease.keras"
 CLASS_PATH = BASE_DIR / "class_names.json"
 IMAGE_SIZE = (256, 256)
-CONFIDENCE_THRESHOLD = 0.60
+CONFIDENCE_THRESHOLD = 0.90
+MIN_CONFIDENCE_MARGIN = 0.25
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 
 st.set_page_config(
@@ -23,10 +24,15 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .block-container { max-width: 760px; padding-top: 1.6rem; padding-bottom: 3rem; }
-    .hero { padding: 1.2rem 1.25rem; border: 1px solid rgba(100,140,100,.25); border-radius: 18px; margin-bottom: 1rem; }
+    .block-container { max-width: 800px; padding-top: 1.5rem; padding-bottom: 3rem; }
+    .hero { padding: 1.35rem 1.4rem; border: 1px solid rgba(100,140,100,.28); border-radius: 20px; margin-bottom: 1.1rem; background: rgba(100,140,100,.045); }
+    .eyebrow { font-size: .82rem; letter-spacing: .04em; text-transform: uppercase; opacity: .72; }
     .muted { opacity: .78; font-size: .92rem; }
-    div[data-testid="stMetric"] { padding: .7rem; border: 1px solid rgba(128,128,128,.2); border-radius: 12px; }
+    .result-primary { padding: 1rem 1.1rem; border: 1px solid rgba(70,145,85,.45); border-radius: 16px; background: rgba(70,145,85,.07); }
+    .result-rank { font-size: .78rem; opacity: .75; margin-bottom: .25rem; }
+    .result-secondary { padding: .8rem .9rem; border: 1px solid rgba(128,128,128,.22); border-radius: 14px; min-height: 100%; }
+    .result-secondary .label { font-size: .92rem; line-height: 1.4; font-weight: 600; }
+    .result-secondary .score { font-size: 1.05rem; font-weight: 650; margin-top: .45rem; }
     .stButton button { width: 100%; border-radius: 12px; min-height: 2.8rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -36,9 +42,9 @@ with open(CLASS_PATH, encoding="utf-8") as f:
 
 st.markdown("""
 <div class="hero">
-  <div style="font-size:2rem">🌿 PlantCare</div>
-  <h1 style="margin:.25rem 0 .4rem 0">จำแนกโรคจากใบพืช</h1>
-  <p style="margin:0">อัปโหลดภาพใบพืชเพื่อดูผลทำนายจากโมเดล MobileNetV2</p>
+  <div class="eyebrow">🌿 PlantCare</div>
+  <h1 style="margin:.25rem 0 .5rem 0">ตรวจสอบสุขภาพใบพืช</h1>
+  <p style="margin:0">อัปโหลดภาพใบพืชที่ต้องการตรวจสอบ ระบบจะประเมินว่าภาพใกล้เคียงกับกลุ่มโรคที่รองรับหรือไม่</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -102,11 +108,16 @@ def predict(image: Image.Image):
         }
         for i in top_indices
     ]
+    confidence = top[0]["confidence"]
+    margin = confidence - top[1]["confidence"] if len(top) > 1 else confidence
+    # Conservative screening, not a true out-of-distribution detector.
+    accepted = confidence >= CONFIDENCE_THRESHOLD and margin >= MIN_CONFIDENCE_MARGIN
     return {
-        "status": "uncertain" if top[0]["confidence"] < CONFIDENCE_THRESHOLD else "ok",
+        "status": "ok" if accepted else "unsupported",
         "top": top,
         "inference_ms": elapsed_ms,
         "plantish_fraction": fraction,
+        "confidence_margin": margin,
     }
 
 uploaded = st.file_uploader(
@@ -126,30 +137,38 @@ if uploaded is not None:
                 st.error("ภาพมีขนาดเล็กเกินไป กรุณาเลือกภาพที่ชัดกว่านี้")
             else:
                 st.image(image, caption="ภาพที่เลือก", use_container_width=True)
-                if st.button("วิเคราะห์ภาพ", type="primary"):
+                st.caption("เพื่อผลลัพธ์ที่ดี ควรใช้ภาพใบพืชที่ชัดเจน มีแสงเพียงพอ และให้ใบพืชเป็นส่วนหลักของภาพ")
+                if st.button("ตรวจสอบภาพ", type="primary"):
                     try:
                         with st.spinner("กำลังวิเคราะห์ภาพ…"):
                             result = predict(image)
                         st.divider()
-                        if result["status"] == "not_leaf":
-                            st.warning("ไม่พบลักษณะสีที่คล้ายใบพืชมากพอ จึงหยุดการวิเคราะห์")
-                            st.write("ลองใช้ภาพใบพืชที่เห็นชัดและมีแสงเพียงพอ")
-                            st.caption("การตรวจนี้เป็นการคัดกรองจากสีแบบง่าย ไม่ใช่โมเดลตรวจจับใบไม้โดยเฉพาะ จึงอาจผิดพลาดได้")
+                        if result["status"] in ("not_leaf", "unsupported"):
+                            st.warning("ยังไม่สามารถประเมินภาพนี้ได้อย่างน่าเชื่อถือ")
+                            st.write("ภาพอาจไม่ใช่ใบพืชที่ระบบรองรับ หรือมีลักษณะแตกต่างจากตัวอย่างที่ระบบรู้จัก")
+                            st.write("ลองอัปโหลดภาพใบพืชที่เห็นชัด โดยให้ใบพืชเป็นส่วนหลักของภาพ และหลีกเลี่ยงฉากหลังหรือวัตถุอื่นที่รบกวน")
+                            st.caption("ระบบคัดกรองจากสีและรูปแบบคะแนนที่ได้ ซึ่งอาจปฏิเสธภาพใบพืชจริงหรือยังยอมรับภาพที่ไม่เหมาะสมได้")
                         else:
                             best = result["top"][0]
-                            if result["status"] == "uncertain":
-                                st.warning("ผลทำนายยังไม่ชัดเจน ควรลองถ่ายภาพใบเดี่ยวให้ชัดขึ้น")
-                            else:
-                                st.success("วิเคราะห์เสร็จแล้ว")
-                            st.subheader("ผลทำนายอันดับ 1")
-                            st.markdown(f"### {best['label']}")
-                            st.metric("ความมั่นใจของโมเดล", f"{best['confidence']:.1%}")
-                            st.subheader("ผลทำนาย 3 อันดับแรก")
-                            for rank, item in enumerate(result["top"], start=1):
-                                st.write(f"**{rank}. {item['label']}** — {item['confidence']:.1%}")
-                                st.progress(min(max(item["confidence"], 0.0), 1.0))
-                            st.caption(f"เวลา inference โดยประมาณ: {result['inference_ms']:.0f} ms")
-                            st.info("ผลนี้เป็นการจำแนกจากโมเดล ไม่ใช่การวินิจฉัยยืนยัน และอาจไม่แม่นยำกับภาพถ่ายภาคสนามที่ต่างจากข้อมูลฝึก")
+                            st.success("ประเมินภาพเสร็จแล้ว")
+                            with st.container(border=True):
+                                st.markdown('<div class="result-rank">อันดับ 1 · ผลที่ระบบประเมินว่าน่าจะใกล้เคียงที่สุด</div>', unsafe_allow_html=True)
+                                st.markdown(f"### {best['label']}")
+                                st.markdown(f"**คะแนนความมั่นใจของโมเดล: {best['confidence']:.1%}**")
+                                st.progress(min(max(best["confidence"], 0.0), 1.0))
+
+                            st.markdown("#### ผลลัพธ์อื่นที่เป็นไปได้")
+                            secondary_cols = st.columns(2)
+                            for col, rank, item in zip(secondary_cols, (2, 3), result["top"][1:3]):
+                                with col:
+                                    with st.container(border=True):
+                                        st.markdown(f'<div class="result-rank">อันดับ {rank}</div>', unsafe_allow_html=True)
+                                        st.markdown(f'<div class="label">{item["label"]}</div>', unsafe_allow_html=True)
+                                        st.markdown(f'<div class="score">{item["confidence"]:.1%}</div>', unsafe_allow_html=True)
+                                        st.progress(min(max(item["confidence"], 0.0), 1.0))
+
+                            st.info("ข้อควรทราบ: เปอร์เซ็นต์นี้เป็นคะแนนความมั่นใจที่คำนวณโดยระบบ ไม่ใช่ความน่าจะเป็นที่ยืนยันว่าโรคดังกล่าวถูกต้อง และไม่ใช่การวินิจฉัยจากผู้เชี่ยวชาญ ผลอาจคลาดเคลื่อนได้ โดยเฉพาะภาพที่ต่างจากตัวอย่างที่ระบบรองรับ")
+                            st.caption(f"ใช้เวลาประมวลผลประมาณ {result['inference_ms']:.0f} มิลลิวินาที")
                     except Exception as exc:
                         st.error("เกิดปัญหาระหว่างโหลดโมเดลหรือวิเคราะห์ภาพ")
                         st.caption(f"รายละเอียดสำหรับผู้พัฒนา: {type(exc).__name__}: {exc}")
@@ -157,5 +176,4 @@ if uploaded is not None:
             st.error("อ่านภาพนี้ไม่ได้ กรุณาเลือกไฟล์ภาพใหม่")
 
 st.divider()
-st.caption("โมเดล MobileNetV2 • 38 คลาสของ PlantVillage • ขนาดอินพุต 256×256 RGB")
-st.caption("ตัวกรองภาพที่ไม่ใช่ใบพืชเป็น heuristic จากสีเท่านั้น อาจปล่อยภาพอื่นผ่านหรือปฏิเสธใบพืชบางภาพได้")
+st.caption("เครื่องมือนี้ใช้ช่วยคัดกรองเบื้องต้นเท่านั้น ไม่ควรใช้แทนการตรวจสอบจากผู้เชี่ยวชาญหรือใช้ตัดสินใจเรื่องการรักษาพืชเพียงอย่างเดียว")
