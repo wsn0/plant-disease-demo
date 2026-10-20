@@ -1,4 +1,5 @@
 from pathlib import Path
+import html
 import io
 import json
 import time
@@ -15,6 +16,9 @@ OOD_PATH = BASE_DIR / "ood_stats.npz"
 # เกณฑ์ความมั่นใจของ softmax ใช้แยกภาพนอกชุดข้อมูลไม่ได้ (รูปสลัดยังได้ ~88%)
 # จึงใช้เป็นแค่ "ธงเตือน" ส่วนการตัดสินว่าภาพแปลกไหมใช้ระยะ Mahalanobis (ood_stats.npz) แทน
 LOW_CONFIDENCE = 0.50
+# ใส่ตัวเลขเพื่อ override เกณฑ์ใน ood_stats.npz (None = ใช้ค่าในไฟล์)
+OOD_WARN_OVERRIDE = None
+OOD_REJECT_OVERRIDE = None
 MIN_CONFIDENCE_MARGIN = 0.15
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 
@@ -31,13 +35,25 @@ st.markdown("""
     [data-testid="stHeader"] { background: rgba(247,250,246,.92); }
     .block-container { max-width: 820px; padding-top: 1.5rem; padding-bottom: 3rem; }
     .hero { padding: 1.35rem 1.4rem; border: 1px solid #dce9d9; border-radius: 20px; margin-bottom: 1.1rem; background: #ffffff; }
+    .hero h1 { font-size: 1.9rem; line-height: 1.3; }
+    .hero p { color: #3c5242; line-height: 1.6; }
     .eyebrow { font-size: .82rem; letter-spacing: .04em; color: #527557; }
     .muted { color: #607064; font-size: .92rem; }
-    .result-primary { padding: 1rem 1.1rem; border: 1px solid #c8dfc5; border-radius: 16px; background: #ffffff; }
-    .result-rank { font-size: .82rem; color: #607064; margin-bottom: .35rem; }
-    .result-secondary { background: #ffffff; border: 1px solid #e0e8dd; border-radius: 14px; padding: .8rem .9rem; min-height: 100%; }
-    .result-secondary .label { font-size: .92rem; line-height: 1.45; font-weight: 600; color: #304735; }
-    .result-secondary .score { font-size: 1rem; font-weight: 650; margin-top: .45rem; color: #527557; }
+    .result-primary { padding: 1.1rem 1.25rem 1.2rem; border: 1px solid #c8dfc5; border-radius: 18px; background: #ffffff; margin: .4rem 0 1.2rem; }
+    .result-rank { font-size: .82rem; color: #607064; margin-bottom: .5rem; }
+    .result-plant { font-size: 1.7rem; font-weight: 700; line-height: 1.3; margin: 0; color: #203326; }
+    .result-disease { font-size: 1.2rem; font-weight: 600; margin: .15rem 0 .9rem; color: #365f3c; }
+    .conf-row { display: flex; justify-content: space-between; font-size: .92rem; color: #304735; margin-bottom: .35rem; }
+    .conf-row b { font-weight: 700; }
+    .bar { height: 8px; background: #e6eee3; border-radius: 99px; overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: #47794d; border-radius: 99px; }
+    .section-title { font-size: 1.05rem; font-weight: 650; margin: .2rem 0 .6rem; color: #203326; }
+    .result-secondary { background: #ffffff; border: 1px solid #e0e8dd; border-radius: 14px; padding: .85rem 1rem 1rem; height: 100%; }
+    .result-secondary .label { font-size: .95rem; line-height: 1.5; font-weight: 600; color: #304735; }
+    .result-secondary .score { font-size: .9rem; margin-top: .5rem; color: #527557; }
+    .result-secondary .bar { height: 6px; margin-top: .45rem; }
+    [data-testid="stImage"] img { max-height: 420px; object-fit: contain; border-radius: 14px; background: #eef3ec; }
+    .stButton { margin: .4rem 0 .2rem; }
     div[data-testid="stAlert"] { border-radius: 12px; }
     .stButton button { width: 100%; border-radius: 12px; min-height: 2.8rem; background: #47794d; border-color: #47794d; }
     .stButton button:hover { background: #365f3c; border-color: #365f3c; }
@@ -80,8 +96,8 @@ def load_ood():
     stats = {
         "mu": z["mu"].astype(np.float64),
         "prec": z["prec"].astype(np.float64),
-        "warn": float(z["warn_threshold"]),
-        "reject": float(z["reject_threshold"]),
+        "warn": OOD_WARN_OVERRIDE if OOD_WARN_OVERRIDE is not None else float(z["warn_threshold"]),
+        "reject": OOD_REJECT_OVERRIDE if OOD_REJECT_OVERRIDE is not None else float(z["reject_threshold"]),
     }
     return {"dual": dual, "stats": stats}
 
@@ -252,6 +268,43 @@ def predict(image: Image.Image):
         "ood_reject": stats["reject"] if stats else None,
     }
 
+def _disease_line(display: dict) -> str:
+    return "🌿 สถานะ: ใบปกติ" if display.get("healthy", False) else f"🦠 โรคที่คาดการณ์: {display['disease']}"
+
+
+def _bar(confidence: float) -> str:
+    pct = min(max(confidence, 0.0), 1.0) * 100
+    return f'<div class="bar"><span style="width:{pct:.1f}%"></span></div>'
+
+
+def render_primary(item: dict):
+    d = item["display"]
+    st.markdown(
+        f'''<div class="result-primary">
+  <div class="result-rank">อันดับ 1 · ผลที่ระบบประเมินว่าใกล้เคียงที่สุด</div>
+  <p class="result-plant">🌱 พืช: {html.escape(d["plant"])}</p>
+  <p class="result-disease">{html.escape(_disease_line(d))}</p>
+  <div class="conf-row"><span>ความมั่นใจในการทำนาย</span><b>{item["confidence"]:.1%}</b></div>
+  {_bar(item["confidence"])}
+</div>''',
+        unsafe_allow_html=True,
+    )
+
+
+def render_secondary(rank: int, item: dict):
+    d = item["display"]
+    status = "🌿 ใบปกติ" if d.get("healthy", False) else f"🦠 {d['disease']}"
+    st.markdown(
+        f'''<div class="result-secondary">
+  <div class="result-rank">อันดับ {rank}</div>
+  <div class="label">🌱 {html.escape(d["plant"])}<br>{html.escape(status)}</div>
+  <div class="score">ความมั่นใจในการทำนาย: {item["confidence"]:.1%}</div>
+  {_bar(item["confidence"])}
+</div>''',
+        unsafe_allow_html=True,
+    )
+
+
 uploaded = st.file_uploader(
     "เลือกรูปใบพืช",
     type=["jpg", "jpeg", "png", "webp"],
@@ -277,47 +330,25 @@ if uploaded is not None:
                         st.divider()
                         if result["status"] in ("not_leaf", "unsupported"):
                             st.warning("ยังไม่สามารถประเมินภาพนี้ได้อย่างน่าเชื่อถือ")
-                            st.write("ภาพอาจไม่ใช่ใบพืชที่ระบบรองรับ หรือมีลักษณะแตกต่างจากตัวอย่างที่ระบบรู้จัก")
-                            st.write("ลองอัปโหลดภาพใบพืชที่เห็นชัด โดยให้ใบพืชเป็นส่วนหลักของภาพ และหลีกเลี่ยงฉากหลังหรือวัตถุอื่นที่รบกวน")
+                            st.markdown(
+                                "- ภาพอาจไม่ใช่ใบพืชที่ระบบรองรับ หรือมีลักษณะแตกต่างจากตัวอย่างที่ระบบรู้จัก\n"
+                                "- ลองอัปโหลดภาพใบพืชที่เห็นชัด โดยให้ใบพืชเป็นส่วนหลักของภาพ และหลีกเลี่ยงฉากหลังหรือวัตถุอื่นที่รบกวน"
+                            )
                             st.caption("ระบบคัดกรองจากสีและรูปแบบคะแนนที่ได้ ซึ่งอาจปฏิเสธภาพใบพืชจริงหรือยังยอมรับภาพที่ไม่เหมาะสมได้")
                         else:
-                            best = result["top"][0]
                             if result["status"] == "caution":
                                 st.warning("ประเมินได้ แต่ควรระวังผลลัพธ์นี้: " + " · ".join(result["flags"]))
                             else:
                                 st.success("ประเมินภาพเสร็จแล้ว")
-                            best_display = best["display"]
-                            with st.container(border=True):
-                                st.markdown('<div class="result-rank">อันดับ 1 · ผลที่ระบบประเมินว่าใกล้เคียงที่สุด</div>', unsafe_allow_html=True)
-                                st.markdown(f"## 🌱 พืช: {best_display['plant']}")
-                                if best_display.get("healthy", False):
-                                    st.markdown("### 🌿 สถานะ: ใบปกติ")
-                                else:
-                                    st.markdown(f"### 🦠 โรคที่คาดการณ์: {best_display['disease']}")
-                                st.markdown(f"**ความมั่นใจในการทำนาย: {best['confidence']:.1%}**")
-                                st.progress(min(max(best["confidence"], 0.0), 1.0))
-
-                            st.markdown("#### ผลลัพธ์ทางเลือก")
-                            secondary_cols = st.columns(2)
-                            for col, rank, item in zip(secondary_cols, (2, 3), result["top"][1:3]):
-                                display = item["display"]
+                            render_primary(result["top"][0])
+                            st.markdown('<div class="section-title">ผลลัพธ์ทางเลือก</div>', unsafe_allow_html=True)
+                            for col, rank, item in zip(st.columns(2, gap="medium"), (2, 3), result["top"][1:3]):
                                 with col:
-                                    with st.container(border=True):
-                                        st.markdown(f'<div class="result-rank">อันดับ {rank}</div>', unsafe_allow_html=True)
-                                        st.markdown(f"**🌱 {display['plant']}**")
-                                        if display.get("healthy", False):
-                                            st.markdown("🌿 ใบปกติ")
-                                        else:
-                                            st.markdown(f"🦠 {display['disease']}")
-                                        st.markdown(f'<div class="score">ความมั่นใจในการทำนาย: {item["confidence"]:.1%}</div>', unsafe_allow_html=True)
-
+                                    render_secondary(rank, item)
+                            st.markdown("<div style='height:.9rem'></div>", unsafe_allow_html=True)
                             st.warning("โปรดทราบ: คะแนนนี้เป็นค่าการทำนายจากระบบ ไม่ใช่การยืนยันว่าพืชเป็นโรคดังกล่าวจริง หากอาการไม่ตรงกับภาพหรือยังไม่แน่ใจ ควรตรวจสอบข้อมูลเพิ่มเติมหรือปรึกษาผู้เชี่ยวชาญ")
-                            st.caption(f"ใช้เวลาประมวลผลประมาณ {result['inference_ms']:.0f} มิลลิวินาที")
-                        if result.get("ood_score") is not None:
-                            with st.expander("รายละเอียดสำหรับผู้พัฒนา (ปรับเกณฑ์)"):
-                                st.write(f"OOD score (Mahalanobis): **{result['ood_score']:.0f}**  "
-                                         f"· เตือนเมื่อ > {result['ood_warn']:.0f} · ไม่ทายเมื่อ > {result['ood_reject']:.0f}")
-                                st.write(f"สถานะ: `{result['status']}`")
+                        if st.query_params.get("debug") == "1" and result.get("ood_score") is not None:
+                            st.caption(f"[debug] OOD {result['ood_score']:.0f} · warn>{result['ood_warn']:.0f} · reject>{result['ood_reject']:.0f} · {result['status']}")
                     except Exception as exc:
                         st.error("เกิดปัญหาระหว่างโหลดโมเดลหรือวิเคราะห์ภาพ")
                         st.caption(f"รายละเอียดสำหรับผู้พัฒนา: {type(exc).__name__}: {exc}")
