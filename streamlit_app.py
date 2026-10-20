@@ -11,8 +11,11 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "best_mobilenetv2_plantdisease.keras"
 CLASS_PATH = BASE_DIR / "class_names.json"
 IMAGE_SIZE = (256, 256)
-CONFIDENCE_THRESHOLD = 0.90
-MIN_CONFIDENCE_MARGIN = 0.25
+OOD_PATH = BASE_DIR / "ood_stats.npz"
+# เกณฑ์ความมั่นใจของ softmax ใช้แยกภาพนอกชุดข้อมูลไม่ได้ (รูปสลัดยังได้ ~88%)
+# จึงใช้เป็นแค่ "ธงเตือน" ส่วนการตัดสินว่าภาพแปลกไหมใช้ระยะ Mahalanobis (ood_stats.npz) แทน
+LOW_CONFIDENCE = 0.50
+MIN_CONFIDENCE_MARGIN = 0.15
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 
 st.set_page_config(
@@ -62,6 +65,43 @@ def load_model():
             f"โมเดลให้ output {output_shape} แต่ class_names.json มี {len(CLASS_NAMES)} คลาส"
         )
     return loaded
+
+
+@st.cache_resource(show_spinner=False)
+def load_ood():
+    """โหลดตัวตรวจภาพนอกชุดข้อมูล (OOD) + โมเดลที่ให้ทั้ง feature และ probability ในรอบเดียว"""
+    import tensorflow as tf
+    model = load_model()
+    gap = next(l for l in model.layers if isinstance(l, tf.keras.layers.GlobalAveragePooling2D))
+    dual = tf.keras.Model(model.input, [gap.output, model.output])
+    if not OOD_PATH.exists():
+        return {"dual": dual, "stats": None}
+    z = np.load(OOD_PATH)
+    stats = {
+        "mu": z["mu"].astype(np.float64),
+        "prec": z["prec"].astype(np.float64),
+        "warn": float(z["warn_threshold"]),
+        "reject": float(z["reject_threshold"]),
+    }
+    return {"dual": dual, "stats": stats}
+
+
+def mahalanobis_score(feature: np.ndarray, stats: dict) -> float:
+    """ระยะถึงคลาสที่ใกล้ที่สุด ยิ่งสูงยิ่งต่างจากภาพที่โมเดลเคยเห็น"""
+    diff = stats["mu"] - feature[None, :]                 # (K, 1280)
+    return float(np.min(np.einsum("kj,jl,kl->k", diff, stats["prec"], diff)))
+
+
+def quality_warnings(rgb_image: Image.Image):
+    """ตรวจคุณภาพภาพแบบเบา ๆ — เตือนเท่านั้น ไม่บล็อก"""
+    g = np.asarray(rgb_image.convert("L").resize((256, 256)), dtype=np.float32)
+    notes = []
+    if g.mean() < 55:
+        notes.append("ภาพค่อนข้างมืด")
+    lap = g[1:-1, 1:-1] * 4 - g[:-2, 1:-1] - g[2:, 1:-1] - g[1:-1, :-2] - g[1:-1, 2:]
+    if lap.var() < 25:
+        notes.append("ภาพค่อนข้างเบลอ")
+    return notes
 
 
 PLANT_NAMES_TH = {
@@ -155,15 +195,17 @@ def image_suitability_check(rgb_image: Image.Image):
 
 def predict(image: Image.Image):
     import tensorflow as tf
-    model = load_model()
+    ood = load_ood()
     likely_plant, fraction = image_suitability_check(image)
+    quality = quality_warnings(image)
     if not likely_plant:
-        return {"status": "not_leaf", "plantish_fraction": fraction}
+        return {"status": "not_leaf", "plantish_fraction": fraction, "quality": quality}
 
     resized = tf.image.resize(np.asarray(image.convert("RGB")), IMAGE_SIZE, method="bilinear")
     batch = tf.keras.applications.mobilenet_v2.preprocess_input(tf.cast(resized, tf.float32))
     start = time.perf_counter()
-    probabilities = np.asarray(model(batch[None, ...], training=False))[0]
+    feat, probs = ood["dual"](batch[None, ...], training=False)
+    probabilities = np.asarray(probs)[0]
     elapsed_ms = (time.perf_counter() - start) * 1000
     top_indices = np.argsort(probabilities)[::-1][:3]
     top = [
@@ -176,14 +218,38 @@ def predict(image: Image.Image):
     ]
     confidence = top[0]["confidence"]
     margin = confidence - top[1]["confidence"] if len(top) > 1 else confidence
-    # Conservative screening, not a true out-of-distribution detector.
-    accepted = confidence >= CONFIDENCE_THRESHOLD and margin >= MIN_CONFIDENCE_MARGIN
+
+    stats = ood["stats"]
+    ood_score = mahalanobis_score(np.asarray(feat)[0].astype(np.float64), stats) if stats else None
+
+    flags = []          # เหตุผลที่ควรระวังผลลัพธ์
+    if stats is None:
+        status = "ok" if (confidence >= 0.90 and margin >= 0.25) else "unsupported"
+    elif ood_score > stats["reject"]:
+        status = "unsupported"                      # ต่างจากข้อมูลที่เคยเห็นมาก → ไม่ทาย
+    else:
+        status = "ok"
+        if ood_score > stats["warn"]:
+            status = "caution"
+            flags.append("ภาพมีลักษณะต่างจากภาพที่ใช้ฝึกโมเดลพอสมควร (เช่น ฉากหลัง แสง หรือมุมถ่าย)")
+        if confidence < LOW_CONFIDENCE:
+            status = "caution"
+            flags.append("ความมั่นใจของโมเดลค่อนข้างต่ำ")
+        elif margin < MIN_CONFIDENCE_MARGIN:
+            status = "caution"
+            flags.append("ผลอันดับ 1 และ 2 ใกล้กันมาก")
+    if quality and status == "ok":
+        status = "caution"
     return {
-        "status": "ok" if accepted else "unsupported",
+        "status": status,
         "top": top,
+        "flags": flags + quality,
         "inference_ms": elapsed_ms,
         "plantish_fraction": fraction,
         "confidence_margin": margin,
+        "ood_score": ood_score,
+        "ood_warn": stats["warn"] if stats else None,
+        "ood_reject": stats["reject"] if stats else None,
     }
 
 uploaded = st.file_uploader(
@@ -216,7 +282,10 @@ if uploaded is not None:
                             st.caption("ระบบคัดกรองจากสีและรูปแบบคะแนนที่ได้ ซึ่งอาจปฏิเสธภาพใบพืชจริงหรือยังยอมรับภาพที่ไม่เหมาะสมได้")
                         else:
                             best = result["top"][0]
-                            st.success("ประเมินภาพเสร็จแล้ว")
+                            if result["status"] == "caution":
+                                st.warning("ประเมินได้ แต่ควรระวังผลลัพธ์นี้: " + " · ".join(result["flags"]))
+                            else:
+                                st.success("ประเมินภาพเสร็จแล้ว")
                             best_display = best["display"]
                             with st.container(border=True):
                                 st.markdown('<div class="result-rank">อันดับ 1 · ผลที่ระบบประเมินว่าใกล้เคียงที่สุด</div>', unsafe_allow_html=True)
@@ -244,6 +313,11 @@ if uploaded is not None:
 
                             st.warning("โปรดทราบ: คะแนนนี้เป็นค่าการทำนายจากระบบ ไม่ใช่การยืนยันว่าพืชเป็นโรคดังกล่าวจริง หากอาการไม่ตรงกับภาพหรือยังไม่แน่ใจ ควรตรวจสอบข้อมูลเพิ่มเติมหรือปรึกษาผู้เชี่ยวชาญ")
                             st.caption(f"ใช้เวลาประมวลผลประมาณ {result['inference_ms']:.0f} มิลลิวินาที")
+                        if result.get("ood_score") is not None:
+                            with st.expander("รายละเอียดสำหรับผู้พัฒนา (ปรับเกณฑ์)"):
+                                st.write(f"OOD score (Mahalanobis): **{result['ood_score']:.0f}**  "
+                                         f"· เตือนเมื่อ > {result['ood_warn']:.0f} · ไม่ทายเมื่อ > {result['ood_reject']:.0f}")
+                                st.write(f"สถานะ: `{result['status']}`")
                     except Exception as exc:
                         st.error("เกิดปัญหาระหว่างโหลดโมเดลหรือวิเคราะห์ภาพ")
                         st.caption(f"รายละเอียดสำหรับผู้พัฒนา: {type(exc).__name__}: {exc}")
